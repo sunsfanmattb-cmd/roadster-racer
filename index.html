@@ -44,29 +44,51 @@ const K={};addEventListener('keydown',e=>{K[e.code]=1;audioInit();if(e.code=='Sp
 addEventListener('keyup',e=>K[e.code]=0);
 let btns=[],touches={};
 const FORCE_TOUCH=/[?&]touch=1/.test(location.search);
-let steerMode=localStorage.rrSteer||'',tiltOK=false,tiltRaw=0,tiltCenter=null,tiltV=0,tiltReq=false,tgl={},rcb={};
-function tiltAngle(e){let a=(screen.orientation&&typeof screen.orientation.angle=='number')?screen.orientation.angle:(typeof window.orientation=='number'?window.orientation:0);a=((a%360)+360)%360;
- if(e.beta==null||e.gamma==null)return null;if(a==90)return e.beta;if(a==270)return -e.beta;if(a==180)return -e.gamma;return e.gamma;}
-function onTilt(e){const r=tiltAngle(e);if(r==null)return;if(!tiltOK){tiltOK=true;if(!steerMode)steerMode='tilt';}tiltRaw=r;if(tiltCenter==null)tiltCenter=r;
- let d=r-tiltCenter;if(d>180)d-=360;if(d<-180)d+=360;const DZ=2.5,LOCK=27;let t=Math.abs(d)<DZ?0:Math.sign(d)*(Math.abs(d)-DZ)/(LOCK-DZ);t=Math.max(-1,Math.min(1,t));tiltV+=(t-tiltV)*.3;}
-function requestTilt(){if(tiltReq)return;tiltReq=true;const D=window.DeviceOrientationEvent;if(!D)return;
- if(typeof D.requestPermission=='function'){D.requestPermission().then(s=>{if(s=='granted')addEventListener('deviceorientation',onTilt);else if(!localStorage.rrSteer)steerMode='slider';}).catch(()=>{});}
- else addEventListener('deviceorientation',onTilt);}
-if(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission!='function'){addEventListener('deviceorientation',onTilt);tiltReq=true;}
+localStorage.removeItem('rrSteer');
+let steerMode=localStorage.rrSteer2||'tilt',tiltOK=false,tiltRaw=0,tiltCenter=null,tiltV=0,tiltTgt=0,tgl={},rcb={},lastTiltEv=0,tiltSrc='',tiltStatus='waiting',permAsked=false,tiltListen=false,lastOri=0;
+const IOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform=='MacIntel'&&navigator.maxTouchPoints>1);
+const NEEDPERM=!!(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission=='function');
+function scrAngle(){let a=(screen.orientation&&typeof screen.orientation.angle=='number')?screen.orientation.angle:(typeof window.orientation=='number'?window.orientation:0);return((Math.round(a/90)*90)%360+360)%360;}
+// d = gravity "down" unit vector in device coords (x right, y top, z out of screen) -> steering roll in screen frame
+function rollFromDown(dx,dy,dz){const a=scrAngle();let sx,sy;
+ if(a==90){sx=-dy;sy=-dx;}else if(a==270){sx=dy;sy=dx;}else if(a==180){sx=-dx;sy=dy;}else{sx=dx;sy=-dy;}
+ return Math.atan2(sx,Math.hypot(sy,dz))*180/Math.PI;}
+function feed(r,src){if(!isFinite(r))return;if(NEEDPERM)permAsked=true;lastTiltEv=performance.now();tiltSrc=src;if(!tiltOK){tiltOK=true;}tiltStatus='active';tiltRaw=r;if(tiltCenter==null)tiltCenter=r;
+ let d=r-tiltCenter;const DZ=2.5,LOCK=27;let t=Math.abs(d)<DZ?0:Math.sign(d)*(Math.abs(d)-DZ)/(LOCK-DZ);tiltTgt=Math.max(-1,Math.min(1,t));}
+function onOri(e){if(e.beta==null||e.gamma==null)return;lastOri=performance.now();const b=e.beta*Math.PI/180,g=e.gamma*Math.PI/180;
+ feed(rollFromDown(Math.cos(b)*Math.sin(g),-Math.sin(b),-Math.cos(b)*Math.cos(g)),e.type=='deviceorientationabsolute'?'abs':'ori');}
+function onMot(e){if(performance.now()-lastOri<500)return;const a=e.accelerationIncludingGravity;if(!a||a.x==null||a.y==null||a.z==null)return;
+ const n=Math.hypot(a.x,a.y,a.z)||1,s=IOS?1:-1;feed(rollFromDown(s*a.x/n,s*a.y/n,s*a.z/n),'motion');}
+function listenTilt(){if(tiltListen)return;tiltListen=true;addEventListener('deviceorientation',onOri);addEventListener('deviceorientationabsolute',onOri);addEventListener('devicemotion',onMot);}
+// must run synchronously inside touchend/click on iOS
+function requestTilt(){if(!NEEDPERM){listenTilt();return;}if(permAsked&&tiltOK)return;permAsked=true;tiltStatus='asking';
+ const ps=[DeviceOrientationEvent.requestPermission()];if(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission=='function')ps.push(DeviceMotionEvent.requestPermission());
+ Promise.all(ps.map(p=>p.catch(()=>'denied'))).then(r=>{if(r.includes('granted')){listenTilt();tiltStatus='waiting';}else tiltStatus='denied';});}
+if(!NEEDPERM){if(window.DeviceOrientationEvent||window.DeviceMotionEvent)listenTilt();else tiltStatus='nosensor';}else{tiltStatus='needtap';if(!IOS)listenTilt();}
+const tiltT0=performance.now();
+function tiltTick(){tiltV+=(tiltTgt-tiltV)*.3;const now=performance.now();
+ if(tiltOK&&now-lastTiltEv>1500){tiltOK=false;tiltStatus='lost';}
+ if(!tiltOK&&tiltListen&&tiltStatus=='waiting'&&now-tiltT0>1500&&!NEEDPERM)tiltStatus='nosensor';}
 const tiltOn=()=>steerMode=='tilt'&&tiltOK;
+function recenter(){tiltCenter=tiltRaw;tiltV=tiltTgt=0;}
+function hit(b,x,y){return b.w&&x>b.x&&x<b.x+b.w&&y>b.y&&y<b.y+b.h;}
+function tiltHint(){if(steerMode!='tilt')return'';const m={active:'TILT: active '+(tiltRaw-(tiltCenter||0)).toFixed(0)+'° ('+tiltSrc+')',needtap:'TILT: tap to allow motion',asking:'TILT: allow motion access…',waiting:'TILT: waiting for sensor…',denied:'TILT: motion denied – using slider',nosensor:'TILT: no sensor – using slider',lost:'TILT: sensor stopped – using slider'};return m[tiltStatus]||'';}
 function recenter(){tiltCenter=tiltRaw;tiltV=0;}
 function hit(b,x,y){return b.w&&x>b.x&&x<b.x+b.w&&y>b.y&&y<b.y+b.h;}
 let slider={},steerT=0,steerId=null,gasP=0,brkP=0;
-function layout(){const s=Math.min(W,H),b=Math.max(60,s*.16),m=16;
- slider={x:m+b*.1,y:H-m-b*.55,w:Math.min(W*.38,b*3.2),h:b*.5,kr:b*.42};
- const tw=Math.max(70,b*1.2),th=Math.max(30,b*.42);tgl={x:m,y:slider.y-slider.h*2.6-th-8,w:tw,h:th};rcb={x:m+tw+8,y:tgl.y,w:th*1.3,h:th};
+let _sb=null;function safeB(){if(_sb==null){const d=document.createElement('div');d.style.cssText='position:fixed;bottom:0;height:0;padding-bottom:env(safe-area-inset-bottom)';document.body.appendChild(d);_sb=parseFloat(getComputedStyle(d).paddingBottom)||0;d.remove();}return _sb;}
+addEventListener('resize',()=>_sb=null);
+function layout(){const s=Math.min(W,H),b=Math.max(60,s*.16),m=16+H*.09+safeB();
+ slider={x:16+b*.1,y:H-m-b*.55,w:Math.min(W*.38,b*3.2),h:b*.5,kr:b*.42};
+ const tw=Math.max(70,b*1.2),th=Math.max(30,b*.42);tgl={x:16,y:slider.y-slider.h*2.6-th-8,w:tw,h:th};rcb={x:16+tw+8,y:tgl.y,w:th*1.3,h:th};
  const gw=b*.62,gh=b*1.45,bw=b*1.05,bh=b*.95;
- btns=[{id:'G',x:W-m-gw,y:H-m-gh,w:gw,h:gh,lb:'GAS'},{id:'B',x:W-m-gw-m-bw,y:H-m-bh,w:bw,h:bh,lb:'BRAKE'},
- {id:'J',x:W-m-gw-m-bw-b*.1,y:H-m-bh-m*2-b*1.3,w:b*1.2,h:b*1.2,lb:'JUMP',round:1}];}
+ const mx=16;btns=[{id:'G',x:W-mx-gw,y:H-m-gh,w:gw,h:gh,lb:'GAS'},{id:'B',x:W-mx-gw-mx-bw,y:H-m-bh,w:bw,h:bh,lb:'BRAKE'},
+ {id:'J',x:W-mx-gw-mx-bw-b*.1,y:H-m-bh-mx*2-b*1.3,w:b*1.2,h:b*1.2,lb:'JUMP',round:1}];}
 let isTouch=FORCE_TOUCH;
 function tUpd(e){e.preventDefault();isTouch=true;audioInit();touches={};gasP=brkP=0;const r=cv.getBoundingClientRect();let sl=false;
- if(e.type=='touchstart'){requestTilt();const t0=e.changedTouches[0],x0=t0.clientX-r.left,y0=t0.clientY-r.top;
-  if(hit(tgl,x0,y0)){steerMode=tiltOn()?'slider':'tilt';localStorage.rrSteer=steerMode;if(steerMode=='tilt')recenter();return;}
+ if(e.type=='touchend')requestTilt();
+ if(e.type=='touchstart'){const t0=e.changedTouches[0],x0=t0.clientX-r.left,y0=t0.clientY-r.top;
+  if(hit(tgl,x0,y0)){steerMode=steerMode=='tilt'?'slider':'tilt';localStorage.rrSteer2=steerMode;if(steerMode=='tilt')recenter();return;}
   if(tiltOn()&&hit(rcb,x0,y0)){recenter();return;}}
  for(const t of e.touches){const x=t.clientX-r.left,y=t.clientY-r.top;
   if(!tiltOn()&&t.identifier===steerId||(!tiltOn()&&steerId===null&&e.type=='touchstart'&&x<W*.5&&y>slider.y-slider.h*2.5)){steerId=t.identifier;sl=true;
@@ -76,10 +98,10 @@ function tUpd(e){e.preventDefault();isTouch=true;audioInit();touches={};gasP=brk
  if(!sl){steerId=null;}
  if(e.type=='touchstart'&&st.mode!='play')start();}
 ['touchstart','touchmove','touchend','touchcancel'].forEach(t=>cv.addEventListener(t,tUpd,{passive:false}));
-cv.addEventListener('mousedown',()=>{audioInit();if(st.mode!='play')start();});
+cv.addEventListener('click',()=>requestTilt());cv.addEventListener('mousedown',()=>{audioInit();if(st.mode!='play')start();});
 function steerVal(){const k=(K.ArrowLeft||K.KeyA?-1:0)+(K.ArrowRight||K.KeyD?1:0);return k||(tiltOn()?tiltV:steerT);}
 const inp=k=>({L:K.ArrowLeft||K.KeyA,R:K.ArrowRight||K.KeyD,G:K.ArrowUp||K.KeyW,B:K.ArrowDown||K.KeyS,J:K.Space}[k]||touches[k]);
-function start(){requestTilt();if(st.mode=='play')return;tiltCenter=tiltOK?tiltRaw:null;tiltV=0;reset();st.mode='play';}
+function start(){if(st.mode=='play')return;tiltCenter=tiltOK?tiltRaw:null;tiltV=0;reset();st.mode='play';}
 // ---- audio ----
 let AC,eng,engG,noise;function audioInit(){if(AC)return;try{AC=new(window.AudioContext||window.webkitAudioContext)();
  eng=AC.createOscillator();eng.type='sawtooth';const f=AC.createBiquadFilter();f.type='lowpass';f.frequency.value=900;engG=AC.createGain();engG.gain.value=0;
@@ -91,7 +113,7 @@ function whoosh(dur,freq,vol){if(!AC)return;const s=AC.createBufferSource();s.bu
 // ---- update ----
 function crash(hard){if(spin>0)return;speed*=hard?.25:.5;spin=1.2;shake=.5;whoosh(.5,200,.6);for(let i=0;i<25;i++)parts.push({x:W/2,y:H*.82,vx:(Math.random()-.5)*400,vy:-Math.random()*300,l:.8,c:'#fc6',s:3});}
 function overlap(x1,w1,x2,w2){return Math.abs(x1-x2)<(w1+w2)/2}
-function update(dt){
+function update(dt){tiltTick();
  if(st.mode!='play'){pos=(pos+dt*MAXS*.3)%trackLen;return;}
  const seg=segAt(pos+CAMH*CD+0),sp=speed/MAXS,dx=dt*2*sp;
  const old=pos;pos+=dt*speed;distance+=dt*speed;
@@ -301,7 +323,7 @@ function drawPedal(b,s){const on=inp(b.id),p=b.id=='G'?(gasP||(on?1:0)):(brkP||(
  ctx.restore();txt(b.lb,cx,b.y-6,s*.42,'rgba(255,255,255,.85)','center');}
 function drawControls(s){const S=slider,cy=S.y+S.h/2;
  const tOn=tiltOn();ctx.fillStyle='rgba(0,0,0,.5)';ctx.strokeStyle='rgba(255,255,255,.6)';ctx.lineWidth=1.5;ctx.beginPath();ctx.roundRect(tgl.x,tgl.y,tgl.w,tgl.h,tgl.h/2);ctx.fill();ctx.stroke();
- txt(tOn?'📱 TILT':'⇆ SLIDER',tgl.x+tgl.w/2,tgl.y+tgl.h*.68,tgl.h*.42,tOn?'#7cf':'#fff','center');
+ txt(steerMode=='tilt'?'📱 TILT':'⇆ SLIDER',tgl.x+tgl.w/2,tgl.y+tgl.h*.68,tgl.h*.42,tOn?'#7cf':'#fff','center');
  if(tOn){ctx.fillStyle='rgba(0,0,0,.5)';ctx.beginPath();ctx.roundRect(rcb.x,rcb.y,rcb.w,rcb.h,rcb.h/2);ctx.fill();ctx.stroke();txt('⟲',rcb.x+rcb.w/2,rcb.y+rcb.h*.72,rcb.h*.6,'#fff','center');}
  ctx.save();if(tOn)ctx.globalAlpha=.3;
  const tg=ctx.createLinearGradient(0,S.y,0,S.y+S.h);tg.addColorStop(0,'rgba(0,0,0,.55)');tg.addColorStop(1,'rgba(60,60,70,.45)');ctx.fillStyle=tg;ctx.beginPath();ctx.roundRect(S.x,S.y+S.h*.3,S.w,S.h*.4,S.h*.2);ctx.fill();
@@ -310,6 +332,7 @@ function drawControls(s){const S=slider,cy=S.y+S.h/2;
  ctx.fillStyle='rgba(0,0,0,.4)';ctx.beginPath();ctx.arc(kx+3,cy+4,kr,0,7);ctx.fill();
  const kg=ctx.createRadialGradient(kx-kr*.35,cy-kr*.35,kr*.1,kx,cy,kr);kg.addColorStop(0,'#f5f7f9');kg.addColorStop(.6,'#a9afb7');kg.addColorStop(1,'#5a6068');ctx.fillStyle=kg;ctx.beginPath();ctx.arc(kx,cy,kr,0,7);ctx.fill();
  ctx.strokeStyle='rgba(30,30,35,.6)';ctx.lineWidth=2;for(const o of[-.3,0,.3]){ctx.beginPath();ctx.moveTo(kx+o*kr,cy-kr*.45);ctx.lineTo(kx+o*kr,cy+kr*.45);ctx.stroke();}
+ const hn=tiltHint();if(hn)txt(hn,tgl.x,tgl.y-8,Math.max(11,s*.36),tiltStatus=='active'?'#7cf':'#ffcf5a','left');
  txt(tOn?'TILT TO STEER':'◀ STEER ▶',S.x+S.w/2,S.y-4,s*.42,'rgba(255,255,255,.85)','center');ctx.restore();
  for(const b of btns){if(b.id!='J'){drawPedal(b,s);continue;}const on=inp('J'),cx=b.x+b.w/2,cy2=b.y+b.h/2,r=b.w/2;
   const jg=ctx.createRadialGradient(cx-r*.3,cy2-r*.3,r*.1,cx,cy2,r);jg.addColorStop(0,on?'#bfe8ff':'#5fb7ff');jg.addColorStop(1,on?'#1d5fa0':'#0b2f5a');ctx.fillStyle=jg;ctx.shadowColor='#4af';ctx.shadowBlur=fuel>=.35?18:0;ctx.beginPath();ctx.arc(cx,cy2,r,0,7);ctx.fill();ctx.shadowBlur=0;

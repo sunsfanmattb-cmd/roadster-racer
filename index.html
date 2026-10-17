@@ -104,10 +104,12 @@ const inp=k=>({L:K.ArrowLeft||K.KeyA,R:K.ArrowRight||K.KeyD,G:K.ArrowUp||K.KeyW,
 function start(){if(st.mode=='play')return;tiltCenter=tiltOK?tiltRaw:null;tiltV=0;reset();st.mode='play';}
 // ---- audio ----
 let AC,eng,engG,noise;function audioInit(){if(AC)return;try{AC=new(window.AudioContext||window.webkitAudioContext)();
- eng=AC.createOscillator();eng.type='sawtooth';const f=AC.createBiquadFilter();f.type='lowpass';f.frequency.value=900;engG=AC.createGain();engG.gain.value=0;
- const o2=AC.createOscillator();o2.type='square';o2.frequency.value=40;const g2=AC.createGain();g2.gain.value=.5;o2.connect(g2);
- eng.connect(f);o2.connect(f);f.connect(engG);engG.connect(AC.destination);eng.start();o2.start();eng._o2=o2;
- const buf=AC.createBuffer(1,AC.sampleRate,AC.sampleRate),d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;noise=buf;}catch(e){}}
+ engG=AC.createGain();engG.gain.value=0;engG.connect(AC.destination);
+ const mk=(type,g)=>{const o=AC.createOscillator();o.type=type;const gg=AC.createGain();gg.gain.value=g;o.connect(gg);gg.connect(engG);o.start();return{o,g:gg};};
+ eng={m:mk('sine',.6),t:mk('triangle',.12),inv:mk('sine',.035)};
+ const buf=AC.createBuffer(1,AC.sampleRate*2,AC.sampleRate),d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;noise=buf;
+ const ns=AC.createBufferSource();ns.buffer=buf;ns.loop=true;const nf=AC.createBiquadFilter();nf.type='bandpass';nf.frequency.value=700;nf.Q.value=.6;const ng=AC.createGain();ng.gain.value=0;ns.connect(nf);nf.connect(ng);ng.connect(AC.destination);ns.start();eng.nf=nf;eng.ng=ng;eng.regen=0;
+ }catch(e){}}
 function whoosh(dur,freq,vol){if(!AC)return;const s=AC.createBufferSource();s.buffer=noise;const f=AC.createBiquadFilter();f.type='bandpass';f.frequency.setValueAtTime(freq,AC.currentTime);f.frequency.exponentialRampToValueAtTime(freq*3,AC.currentTime+dur);
  const g=AC.createGain();g.gain.setValueAtTime(vol,AC.currentTime);g.gain.exponentialRampToValueAtTime(.001,AC.currentTime+dur);s.connect(f);f.connect(g);g.connect(AC.destination);s.start();s.stop(AC.currentTime+dur);}
 // ---- update ----
@@ -149,7 +151,10 @@ function update(dt){tiltTick();if(jumpReq>0)jumpReq-=dt;
  if(msgT>0)msgT-=dt;if(shake>0)shake-=dt;
  for(const p of parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.l-=dt;if(p.smoke)p.s+=dt*20;}parts=parts.filter(p=>p.l>0);if(parts.length>600)parts.splice(0,parts.length-600);
  if(timeLeft<=0){timeLeft=0;st.mode='over';speed=0;}
- if(AC){engG.gain.value=st.mode=='play'?.05+sp*.06:0;eng.frequency.value=50+sp*220+(jumpZ>0?40:0);eng._o2.frequency.value=25+sp*110;}
+ if(AC){const T=AC.currentTime,on=st.mode=='play',br=on&&inp('B')&&speed>MAXS*.05;eng.regen+=((br?1:0)-eng.regen)*Math.min(1,dt*6);
+  const f=200+sp*1000-eng.regen*60*sp;eng.m.o.frequency.setTargetAtTime(f,T,.05);eng.t.o.frequency.setTargetAtTime(f*2,T,.05);eng.inv.o.frequency.setTargetAtTime(f*6.5+eng.regen*900,T,.05);
+  eng.inv.g.gain.setTargetAtTime(.035+eng.regen*.05,T,.05);engG.gain.setTargetAtTime(on?.012+sp*.03:0,T,.08);
+  eng.ng.gain.setTargetAtTime(on?sp*sp*.05:0,T,.1);eng.nf.frequency.setTargetAtTime(500+sp*1500,T,.1);}
 }
 // ---- render ----
 function project(p,cx,cy,cz){const tx=p.x-cx,ty=p.y-cy,tz=p.z-cz;p.s.sc=CD/tz;p.s.x=Math.round(W/2+p.s.sc*tx*W/2);p.s.y=Math.round(H*HORF-p.s.sc*ty*H/2);p.s.w=Math.round(p.s.sc*RW*W/2);}
